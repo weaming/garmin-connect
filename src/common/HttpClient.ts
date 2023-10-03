@@ -21,10 +21,11 @@ const crypto = require('crypto');
 const CSRF_RE = new RegExp('name="_csrf"\\s+value="(.+?)"');
 const TICKET_RE = new RegExp('ticket=([^"]+)"');
 const ACCOUNT_LOCKED_RE = new RegExp('var statuss*=s*"([^"]*)"');
+const PAGE_TITLE_RE = new RegExp('<title>([^<]*)</title>');
 
 const USER_AGENT_CONNECTMOBILE = 'com.garmin.android.apps.connectmobile';
 const USER_AGENT_BROWSER =
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1';
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36';
 
 const OAUTH_CONSUMER_URL =
     'https://thegarth.s3.amazonaws.com/oauth_consumer.json';
@@ -48,7 +49,10 @@ export class HttpClient {
                 const originalRequest = error.config;
                 // console.log('originalRequest:', originalRequest)
                 // Auto Refresh token
-                if (error.response.status === 401 && !originalRequest._retry) {
+                if (
+                    error?.response?.status === 401 &&
+                    !originalRequest?._retry
+                ) {
                     if (!this.oauth2Token) {
                         return;
                     }
@@ -130,6 +134,17 @@ export class HttpClient {
         return response?.data;
     }
 
+    async delete<T>(url: string, config?: AxiosRequestConfig<any>): Promise<T> {
+        const response = await this.client.post<T>(url, null, {
+            ...config,
+            headers: {
+                ...config?.headers,
+                'X-Http-Method-Override': 'DELETE'
+            }
+        });
+        return response?.data;
+    }
+
     setCommonHeader(headers: RawAxiosRequestHeaders): void {
         _.each(headers, (headerValue, key) => {
             this.client.defaults.headers.common[key] = headerValue;
@@ -181,7 +196,7 @@ export class HttpClient {
         const step1Url = `${this.url.GARMIN_SSO_EMBED}?${qs.stringify(
             step1Params
         )}`;
-        console.log('login - step1Url:', step1Url);
+        // console.log('login - step1Url:', step1Url);
         await this.client.get(step1Url);
 
         // Step2 Get _csrf
@@ -192,7 +207,7 @@ export class HttpClient {
             gauthHost: this.url.GARMIN_SSO_EMBED
         };
         const step2Url = `${this.url.SIGNIN_URL}?${qs.stringify(step2Params)}`;
-        console.log('login - step2Url:', step2Url);
+        // console.log('login - step2Url:', step2Url);
         const step2Result = await this.get<string>(step2Url);
         // console.log('login - step2Result:', step2Result)
         const csrfRegResult = CSRF_RE.exec(step2Result);
@@ -200,7 +215,7 @@ export class HttpClient {
             throw new Error('login - csrf not found');
         }
         const csrf_token = csrfRegResult[1];
-        console.log('login - csrf:', csrf_token);
+        // console.log('login - csrf:', csrf_token);
 
         // Step3 Get ticket
         const signinParams = {
@@ -215,7 +230,7 @@ export class HttpClient {
             redirectAfterAccountCreationUrl: this.url.GARMIN_SSO_EMBED
         };
         const step3Url = `${this.url.SIGNIN_URL}?${qs.stringify(signinParams)}`;
-        console.log('login - step3Url:', step3Url);
+        // console.log('login - step3Url:', step3Url);
         const step3Form = new FormData();
         step3Form.append('username', username);
         step3Form.append('password', password);
@@ -232,6 +247,7 @@ export class HttpClient {
         });
         // console.log('step3Result:', step3Result)
         this.handleAccountLocked(step3Result);
+        this.handlePageTitle(step3Result);
         this.handleMFA(step3Result);
 
         const ticketRegResult = TICKET_RE.exec(step3Result);
@@ -247,6 +263,22 @@ export class HttpClient {
     // TODO: Handle MFA
     handleMFA(htmlStr: string): void {}
 
+    // TODO: Handle Phone number
+    handlePageTitle(htmlStr: string): void {
+        const pageTitileRegResult = PAGE_TITLE_RE.exec(htmlStr);
+        if (pageTitileRegResult) {
+            const title = pageTitileRegResult[1];
+            console.log('login page title:', title);
+            if (_.includes(title, 'Update Phone Number')) {
+                // current I don't know where to update it
+                // See:  https://github.com/matin/garth/issues/19
+                throw new Error(
+                    "login failed (Update Phone number), please update your phone number, currently I don't know where to update it"
+                );
+            }
+        }
+    }
+
     handleAccountLocked(htmlStr: string): void {
         const accountLockedRegResult = ACCOUNT_LOCKED_RE.exec(htmlStr);
         if (accountLockedRegResult) {
@@ -259,11 +291,14 @@ export class HttpClient {
     }
 
     async refreshOauth2Token() {
-        if (!this.oauth2Token || !this.oauth1Token || !this.OAUTH_CONSUMER) {
-            throw new Error('No Oauth2Token or Oauth1Token or OAUTH_CONSUMER');
+        if (!this.OAUTH_CONSUMER) {
+            await this.fetchOauthConsumer();
+        }
+        if (!this.oauth2Token || !this.oauth1Token) {
+            throw new Error('No Oauth2Token or Oauth1Token');
         }
         const oauth1 = {
-            oauth: this.getOauthClient(this.OAUTH_CONSUMER),
+            oauth: this.getOauthClient(this.OAUTH_CONSUMER!),
             token: this.oauth1Token
         };
         await this.exchange(oauth1);
@@ -290,7 +325,7 @@ export class HttpClient {
             method: 'GET'
         };
         const headers = oauth.toHeader(oauth.authorize(step4RequestData));
-        console.log('getOauth1Token - headers:', headers);
+        // console.log('getOauth1Token - headers:', headers);
 
         const response = await this.get<string>(url, {
             headers: {
@@ -298,9 +333,9 @@ export class HttpClient {
                 'User-Agent': USER_AGENT_CONNECTMOBILE
             }
         });
-        console.log('getOauth1Token - response:', response);
+        // console.log('getOauth1Token - response:', response);
         const token = qs.parse(response) as unknown as IOauth1Token;
-        console.log('getOauth1Token - token:', token);
+        // console.log('getOauth1Token - token:', token);
         this.oauth1Token = token;
         return { token, oauth };
     }
@@ -324,7 +359,7 @@ export class HttpClient {
             key: oauth1.token.oauth_token,
             secret: oauth1.token.oauth_token_secret
         };
-        console.log('exchange - token:', token);
+        // console.log('exchange - token:', token);
 
         const baseUrl = `${this.url.OAUTH_URL}/exchange/user/2.0`;
         const requestData = {
@@ -334,9 +369,9 @@ export class HttpClient {
         };
 
         const step5AuthData = oauth1.oauth.authorize(requestData, token);
-        console.log('login - step5AuthData:', step5AuthData);
+        // console.log('login - step5AuthData:', step5AuthData);
         const url = `${baseUrl}?${qs.stringify(step5AuthData)}`;
-        console.log('exchange - url:', url);
+        // console.log('exchange - url:', url);
         this.oauth2Token = undefined;
         const response = await this.post<IOauth2Token>(url, null, {
             headers: {
@@ -344,9 +379,9 @@ export class HttpClient {
                 'Content-Type': 'application/x-www-form-urlencoded'
             }
         });
-        console.log('exchange - response:', response);
+        // console.log('exchange - response:', response);
         this.oauth2Token = this.setOauth2TokenExpiresAt(response);
-        console.log('exchange - oauth2Token:', this.oauth2Token);
+        // console.log('exchange - oauth2Token:', this.oauth2Token);
     }
 
     setOauth2TokenExpiresAt(token: IOauth2Token): IOauth2Token {
